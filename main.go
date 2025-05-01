@@ -9,8 +9,10 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	
@@ -20,6 +22,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries *database.Queries
+	platform string
 }
 
 func main() {
@@ -38,13 +41,16 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthCheckHandler)	
 
+	platform := os.Getenv("PLATFORM")
 	cfg := &apiConfig{
 		dbQueries: dbQueries,
+		platform: platform,
 	}
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /admin/metrics", cfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
 	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
 
 	server := &http.Server{
 		Addr: ":" + port,
@@ -81,10 +87,70 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
+	// Check if platform is dev, otherwise return forbidden
+	if cfg.platform != "dev" {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	// Reset the hit counter
 	cfg.fileserverHits.Store(0)
+
+	// Delete all users from the database
+	ctx := r.Context()
+	err := cfg.dbQueries.DeleteAllUsers(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Hits reset to 0"))
+	w.Write([]byte("Hits reset to 0 and all users deleted"))
+}
+
+func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
+	type createUserRequest struct {
+		Email string `json:"email"`
+	}
+
+	type createUserResponse struct {
+		ID        string    `json:"id"`
+		Email     string    `json:"email"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	var req createUserRequest
+	if err := decoder.Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	id := uuid.New()
+	now := time.Now().UTC()
+
+	user, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+		ID:        id,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Email:     req.Email,
+	})
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(createUserResponse{
+		ID:        user.ID.String(),
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	})
 }
 
 func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
