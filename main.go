@@ -49,8 +49,8 @@ func main() {
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /admin/metrics", cfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
+	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 
 	server := &http.Server{
 		Addr: ":" + port,
@@ -153,31 +153,39 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-	type validationRequest struct {
-		Body string `json:"body"`
+func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
+	type createChirpRequest struct {
+		Body   string `json:"body"`
+		UserID string `json:"user_id"`
 	}
-	type cleanedResponse struct {
-		CleanedBody string `json:"cleaned_body"`
+
+	type createChirpResponse struct {
+		ID        string    `json:"id"`
+		Body      string    `json:"body"`
+		UserID    string    `json:"user_id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
 	}
-	type validationErrorResponse struct {
+
+	type errorResponse struct {
 		Error string `json:"error"`
 	}
+
 	decoder := json.NewDecoder(r.Body)
-	var req validationRequest
+	var req createChirpRequest
 	if err := decoder.Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(validationErrorResponse{Error: err.Error()})
+		json.NewEncoder(w).Encode(errorResponse{Error: err.Error()})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	
+	// Validate the chirp
 	// Check if the chirp is too long (more than 140 characters)
 	if len(req.Body) > 140 {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(validationErrorResponse{Error: "Chirp is too long"})
+		json.NewEncoder(w).Encode(errorResponse{Error: "Chirp is too long"})
 		return
 	}
 
@@ -212,11 +220,46 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Join the words back together
-	cleanedText := strings.Join(words, " ")
+	// Join the words back together to get the cleaned text
+	cleanedBody := strings.Join(words, " ")
 
-	// Return the cleaned text
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(cleanedResponse{CleanedBody: cleanedText})
+	// Parse the user ID
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid user ID"})
+		return
+	}
+
+	// Create the chirp in the database
+	id := uuid.New()
+	now := time.Now().UTC()
+
+	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+		ID:        id,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Body:      cleanedBody,
+		UserID:    userID,
+	})
+
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to create chirp"})
+		return
+	}
+
+	// Return the created chirp
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(createChirpResponse{
+		ID:        chirp.ID.String(),
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+	})
 }
 
