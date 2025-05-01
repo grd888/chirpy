@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"log"
 	"net/http"
+	"encoding/json"
 )
 
 type apiConfig struct {
@@ -22,6 +23,7 @@ func main() {
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /admin/metrics", cfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
+	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
 
 	server := &http.Server{
 		Addr: ":" + port,
@@ -62,5 +64,38 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Hits reset to 0"))
+}
+
+func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
+	type validationRequest struct {
+		Body string `json:"body"`
+	}
+	type validationResponse struct {
+		Valid bool `json:"valid"`
+	}
+	type validationErrorResponse struct {
+		Error string `json:"error"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	var req validationRequest
+	if err := decoder.Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(validationErrorResponse{Error: err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	
+	// Check if the chirp is too long (more than 140 characters)
+	if len(req.Body) > 140 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(validationErrorResponse{Error: "Chirp is too long"})
+		return
+	}
+
+	// Chirp is valid
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(validationResponse{Valid: true})
 }
 
