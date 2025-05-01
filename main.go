@@ -1,27 +1,46 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
-	"sync/atomic"
 	"log"
 	"net/http"
-	"encoding/json"
+	"os"
 	"strings"
+	"sync/atomic"
 	"unicode"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+	
+	"github.com/grd888/chirpy/internal/database"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries *database.Queries
 }
 
 func main() {
 	const filepathRoot = "."
 	const port = "8080"
-
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("Warning: Error loading .env file:", err)
+	}
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dbQueries := database.New(db)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthCheckHandler)	
 
-	cfg := &apiConfig{}
+	cfg := &apiConfig{
+		dbQueries: dbQueries,
+	}
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /admin/metrics", cfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
@@ -93,7 +112,7 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	if len(req.Body) > 140 {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(validationErrorResponse{Error: "Chirp is too long"})
-		
+		return
 	}
 
 	// Clean profane words
