@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"encoding/json"
+	"strings"
+	"unicode"
 )
 
 type apiConfig struct {
@@ -70,8 +72,8 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	type validationRequest struct {
 		Body string `json:"body"`
 	}
-	type validationResponse struct {
-		Valid bool `json:"valid"`
+	type cleanedResponse struct {
+		CleanedBody string `json:"cleaned_body"`
 	}
 	type validationErrorResponse struct {
 		Error string `json:"error"`
@@ -91,11 +93,45 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	if len(req.Body) > 140 {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(validationErrorResponse{Error: "Chirp is too long"})
-		return
+		
 	}
 
-	// Chirp is valid
+	// Clean profane words
+	profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
+	// Split the text into words
+	words := strings.Fields(req.Body)
+	for i, word := range words {
+		// Remove any punctuation for comparison
+		cleanWord := strings.TrimFunc(word, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+		})
+		
+		// Check if the word (case-insensitive) is in the profane list
+		for _, profane := range profaneWords {
+			if strings.EqualFold(cleanWord, profane) {
+				// Replace only the word part, keeping any punctuation
+				prefix := ""
+				suffix := ""
+				for j, char := range word {
+					if !unicode.IsLetter(char) && !unicode.IsNumber(char) {
+						if j < len(cleanWord) {
+							prefix += string(char)
+						} else {
+							suffix += string(char)
+						}
+					}
+				}
+				words[i] = prefix + "****" + suffix
+				break
+			}
+		}
+	}
+
+	// Join the words back together
+	cleanedText := strings.Join(words, " ")
+
+	// Return the cleaned text
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(validationResponse{Valid: true})
+	json.NewEncoder(w).Encode(cleanedResponse{CleanedBody: cleanedText})
 }
 
