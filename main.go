@@ -51,6 +51,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
+	mux.HandleFunc("GET /api/chirps", cfg.getAllChirpsHandler)
 
 	server := &http.Server{
 		Addr: ":" + port,
@@ -261,5 +262,17 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 		CreatedAt: chirp.CreatedAt,
 		UpdatedAt: chirp.UpdatedAt,
 	})
+}
+
+func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.dbQueries.GetAllChirps(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(chirps)
 }
 
