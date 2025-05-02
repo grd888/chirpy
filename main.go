@@ -25,6 +25,10 @@ type apiConfig struct {
 	platform string
 }
 
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
 func main() {
 	const filepathRoot = "."
 	const port = "8080"
@@ -52,6 +56,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 	mux.HandleFunc("GET /api/chirps", cfg.getAllChirpsHandler)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpHandler)
 
 	server := &http.Server{
 		Addr: ":" + port,
@@ -276,3 +281,33 @@ func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(chirps)
 }
 
+func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
+	chirpIDStr := r.PathValue("chirpID")
+	chirpID, err := uuid.Parse(chirpIDStr)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid chirp ID"})
+		return
+	}
+
+	chirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		// Check if the error is 'no rows in result set'
+		if err == sql.ErrNoRows {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(errorResponse{Error: "Chirp not found"})
+		} else {
+			log.Printf("Error getting chirp %s: %v", chirpID, err)
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(errorResponse{Error: "Failed to retrieve chirp"})
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(chirp) // The generated Chirp model matches the required output
+}
