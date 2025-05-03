@@ -24,6 +24,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries *database.Queries
 	platform string
+	jwtSecret string
 }
 
 type errorResponse struct {
@@ -36,6 +37,10 @@ func main() {
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Warning: Error loading .env file:", err)
+	}
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET is not set in the environment")
 	}
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
@@ -50,6 +55,7 @@ func main() {
 	cfg := &apiConfig{
 		dbQueries: dbQueries,
 		platform: platform,
+		jwtSecret: jwtSecret,
 	}
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /admin/metrics", cfg.metricsHandler)
@@ -174,7 +180,7 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
 	type createChirpRequest struct {
 		Body   string `json:"body"`
-		UserID string `json:"user_id"`
+		// UserID string `json:"user_id"` // Removed: UserID should come from JWT
 	}
 
 	type createChirpResponse struct {
@@ -189,6 +195,22 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 		Error string `json:"error"`
 	}
 
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid token"})
+		return
+	}
+
+	validatedUserID, err := auth.ValidateJWT(tokenString, cfg.jwtSecret)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid token"})
+		return
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	var req createChirpRequest
 	if err := decoder.Decode(&req); err != nil {
@@ -197,7 +219,7 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 		json.NewEncoder(w).Encode(errorResponse{Error: err.Error()})
 		return
 	}
-
+	
 	// Validate the chirp
 	// Check if the chirp is too long (more than 140 characters)
 	if len(req.Body) > 140 {
@@ -241,15 +263,6 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 	// Join the words back together to get the cleaned text
 	cleanedBody := strings.Join(words, " ")
 
-	// Parse the user ID
-	userID, err := uuid.Parse(req.UserID)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid user ID"})
-		return
-	}
-
 	// Create the chirp in the database
 	id := uuid.New()
 	now := time.Now().UTC()
@@ -259,7 +272,7 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 		CreatedAt: now,
 		UpdatedAt: now,
 		Body:      cleanedBody,
-		UserID:    userID,
+		UserID:    validatedUserID, // Use the ID from the validated JWT
 	})
 
 	if err != nil {
@@ -325,9 +338,11 @@ func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
+	// ExpiresInSeconds is optional
 	type loginRequest struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		ExpiresInSeconds int `json:"expires_in_seconds"`
 	}
 
 	type loginResponse struct {
@@ -335,6 +350,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		Email     string    `json:"email"`
 		CreatedAt time.Time `json:"created_at"`
 		UpdatedAt time.Time `json:"updated_at"`
+		Token     string    `json:"token"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -361,6 +377,18 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	expiresInSeconds := req.ExpiresInSeconds
+	if expiresInSeconds == 0 || expiresInSeconds > 60 * 60 {
+		expiresInSeconds = 60 * 60 // Default to 1 hour
+	}
+	tokenString, err := auth.MakeJWT(user.ID, cfg.jwtSecret, time.Duration(expiresInSeconds) * time.Second)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to create JWT"})
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(loginResponse{
@@ -368,5 +396,6 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		Email:     user.Email,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
+		Token:     tokenString,
 	})
 }

@@ -2,7 +2,8 @@ package auth
 
 import (
 	"time"
-
+	"net/http"
+	"strings"
 	"errors"
 	"fmt"
 
@@ -55,3 +56,16 @@ func ValidateJWT(tokenString string, tokenSecret string) (uuid.UUID, error) {
 
 	return userID, nil
 }
+func GetBearerToken(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("authorization header is missing")
+	}
+	
+	if len(authHeader) > 7 && strings.HasPrefix(authHeader, "Bearer ") {
+		return authHeader[7:], nil
+	}
+	
+	return authHeader, nil
+}
+	

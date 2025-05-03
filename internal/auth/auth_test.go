@@ -3,6 +3,7 @@ package auth
 import (
 	"testing"
 	"time"
+	"net/http"
 
 	"github.com/google/uuid"
 )
@@ -94,5 +95,61 @@ func TestPasswordHashing(t *testing.T) {
 	err = CheckPasswordHash(hashedPassword, wrongPassword)
 	if err == nil {
 		t.Error("CheckPasswordHash succeeded for incorrect password, expected error")
+	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+	tests := []struct {
+		name        string
+		headers     http.Header
+		wantToken   string
+		wantErr     bool
+		wantErrText string
+	}{
+		{
+			name:        "Valid Bearer Token",
+			headers:     http.Header{"Authorization": []string{"Bearer mytoken123"}},
+			wantToken:   "Bearer mytoken123",
+			wantErr:     false,
+			wantErrText: "",
+		},
+		{
+			name:        "Missing Authorization Header",
+			headers:     http.Header{},
+			wantToken:   "",
+			wantErr:     true,
+			wantErrText: "authorization header is missing",
+		},
+		{
+			name:        "Empty Authorization Header Value",
+			headers:     http.Header{"Authorization": []string{""}},
+			wantToken:   "",
+			wantErr:     true,
+			wantErrText: "authorization header is missing", // Current impl treats empty value same as missing
+		},
+		{
+			name:        "Non-Bearer Token (still returns full string)",
+			headers:     http.Header{"Authorization": []string{"Basic dXNlcjpwYXNz"}},
+			wantToken:   "Basic dXNlcjpwYXNz",
+			wantErr:     false,
+			wantErrText: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotToken, err := GetBearerToken(tt.headers)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetBearerToken() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if err != nil && err.Error() != tt.wantErrText {
+				t.Errorf("GetBearerToken() error text = %q, wantErrText %q", err.Error(), tt.wantErrText)
+			}
+			if gotToken != tt.wantToken {
+				t.Errorf("GetBearerToken() gotToken = %v, want %v", gotToken, tt.wantToken)
+			}
+		})
 	}
 }
