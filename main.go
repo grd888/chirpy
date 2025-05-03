@@ -17,6 +17,7 @@ import (
 	_ "github.com/lib/pq"
 	
 	"github.com/grd888/chirpy/internal/database"
+	"github.com/grd888/chirpy/internal/auth"
 )
 
 type apiConfig struct {
@@ -54,6 +55,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", cfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
+	mux.HandleFunc("POST /api/login", cfg.loginHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 	mux.HandleFunc("GET /api/chirps", cfg.getAllChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpHandler)
@@ -118,7 +120,9 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
 	type createUserRequest struct {
 		Email string `json:"email"`
+		Password string `json:"password"`
 	}
+
 
 	type createUserResponse struct {
 		ID        string    `json:"id"`
@@ -137,11 +141,19 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	id := uuid.New()
 	now := time.Now().UTC()
 
+
+	hashedPassword, err := auth.HashPassword(req.Password)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	user, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
 		ID:        id,
 		CreatedAt: now,
 		UpdatedAt: now,
 		Email:     req.Email,
+		HashedPassword: hashedPassword,
 	})
 
 	if err != nil {
@@ -310,4 +322,51 @@ func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(chirp) // The generated Chirp model matches the required output
+}
+
+func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
+	type loginRequest struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	type loginResponse struct {
+		ID        string    `json:"id"`
+		Email     string    `json:"email"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	var req loginRequest
+	if err := decoder.Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: err.Error()})
+		return
+	}
+	fmt.Println(req)
+	user, err := cfg.dbQueries.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to retrieve user"})
+		return
+	}
+
+	if err := auth.CheckPasswordHash(user.HashedPassword, req.Password); err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid password"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(loginResponse{
+		ID:        user.ID.String(),
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	})
 }
