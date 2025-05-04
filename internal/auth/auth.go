@@ -1,11 +1,13 @@
 package auth
 
 import (
-	"time"
-	"net/http"
-	"strings"
 	"errors"
 	"fmt"
+	"crypto/rand"
+	"encoding/hex"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -69,3 +71,11 @@ func GetBearerToken(headers http.Header) (string, error) {
 	return authHeader, nil
 }
 	
+// MakeRefreshToken generates a cryptographically-secure random refresh token.
+func MakeRefreshToken() (string, error) {
+	b := make([]byte, 32)                 // 256-bit token
+	if _, err := rand.Read(b); err != nil {
+			return "", fmt.Errorf("rand read: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
