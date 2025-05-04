@@ -61,12 +61,14 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", cfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.resetHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
+	mux.HandleFunc("PUT /api/users", cfg.handlerUpdateUser)
 	mux.HandleFunc("POST /api/login", cfg.loginHandler)
 	mux.HandleFunc("POST /api/refresh", cfg.refreshHandler)
 	mux.HandleFunc("POST /api/revoke", cfg.revokeHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 	mux.HandleFunc("GET /api/chirps", cfg.getAllChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpHandler)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", cfg.handlerDeleteChirp)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -487,5 +489,149 @@ func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return 204 No Content for successful revocation
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+	type updateUserRequest struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	// Response struct mirroring database.User but omitting password
+	type updateUserResponse struct {
+		ID        string    `json:"id"`
+		Email     string    `json:"email"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+
+	// 1. Get token from header
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Missing or malformed token"})
+		return
+	}
+
+	// 2. Validate token and get user ID (subject)
+	userID, err := auth.ValidateJWT(tokenString, cfg.jwtSecret) // Renamed 'subject' to 'userID', it's already a UUID
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid token"})
+		return
+	}
+
+	// 3. Decode request body
+	decoder := json.NewDecoder(r.Body)
+	var req updateUserRequest
+	if err := decoder.Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid request body"})
+		return
+	}
+
+	// 4. Hash the password
+	hashedPassword, err := auth.HashPassword(req.Password)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to hash password"})
+		return
+	}
+
+	// 5. Update user in database
+	ctx := r.Context()
+	updatedUser, err := cfg.dbQueries.UpdateUser(ctx, database.UpdateUserParams{
+		ID:             userID,
+		Email:          req.Email,
+		HashedPassword: hashedPassword,
+		// UpdatedAt is set by NOW() in the query
+	})
+	if err != nil {
+		log.Printf("Failed to update user %s: %v", userID, err) // Add logging
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to update user"})
+		return
+	}
+
+	// 6. Prepare response
+	resp := updateUserResponse{
+		ID:        updatedUser.ID.String(),
+		Email:     updatedUser.Email,
+		CreatedAt: updatedUser.CreatedAt,
+		UpdatedAt: updatedUser.UpdatedAt,
+	}
+
+	// 7. Send response
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	// 1. Get token and validate
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Missing or malformed token"})
+		return
+	}
+
+	authUserID, err := auth.ValidateJWT(tokenString, cfg.jwtSecret)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid token"})
+		return
+	}
+
+	// 2. Get chirpID from path
+	chirpIDString := r.PathValue("chirpID")
+	chirpID, err := uuid.Parse(chirpIDString)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid chirp ID format"})
+		return
+	}
+
+	// 3. Get chirp to check author
+	ctx := r.Context()
+	chirp, err := cfg.dbQueries.GetChirp(ctx, chirpID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		log.Printf("Failed to get chirp %s for deletion check: %v", chirpID, err)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to retrieve chirp"})
+		return
+	}
+
+	// 4. Check authorization
+	if chirp.UserID != authUserID {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	// 5. Delete chirp
+	err = cfg.dbQueries.DeleteChirp(ctx, chirpID)
+	if err != nil {
+		log.Printf("Failed to delete chirp %s: %v", chirpID, err)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to delete chirp"})
+		return
+	}
+
+	// 6. Respond with 204 No Content
 	w.WriteHeader(http.StatusNoContent)
 }
