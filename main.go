@@ -306,10 +306,36 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
-	chirps, err := cfg.dbQueries.GetAllChirps(r.Context())
+	authorIDStr := r.URL.Query().Get("author_id")
+
+	var chirps []database.Chirp
+	var err error
+
+	if authorIDStr != "" {
+		authorID, parseErr := uuid.Parse(authorIDStr)
+		if parseErr != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(errorResponse{Error: "Invalid author_id format"})
+			return
+		}
+		// This function will be created in the database package later
+		chirps, err = cfg.dbQueries.GetChirpsByAuthorID(r.Context(), authorID)
+	} else {
+		chirps, err = cfg.dbQueries.GetAllChirps(r.Context())
+	}
+
 	if err != nil {
+		log.Printf("Error fetching chirps: %v", err) // Added logging for server-side visibility
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to retrieve chirps"}) // Provide a generic error message
 		return
+	}
+
+	// If no chirps are found, an empty slice is preferred over null in JSON
+	if chirps == nil {
+		chirps = []database.Chirp{}
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
