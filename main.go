@@ -13,11 +13,10 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
-	"github.com/joho/godotenv"
-	_ "github.com/lib/pq"
-
 	"github.com/grd888/chirpy/internal/auth"
 	"github.com/grd888/chirpy/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
@@ -25,6 +24,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaKey       string
 }
 
 type errorResponse struct {
@@ -39,9 +39,14 @@ func main() {
 		log.Println("Warning: Error loading .env file:", err)
 	}
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 	if jwtSecret == "" {
 		log.Fatal("JWT_SECRET is not set in the environment")
 	}
+	if polkaKey == "" {
+		log.Fatal("POLKA_KEY is not set in the environment")
+	}
+
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -53,9 +58,10 @@ func main() {
 
 	platform := os.Getenv("PLATFORM")
 	cfg := &apiConfig{
-		dbQueries: dbQueries,
-		platform:  platform,
-		jwtSecret: jwtSecret,
+		dbQueries:   dbQueries,
+		platform:    platform,
+		jwtSecret:   jwtSecret,
+		polkaKey:    polkaKey,
 	}
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /admin/metrics", cfg.metricsHandler)
@@ -69,6 +75,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", cfg.getAllChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpHandler)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", cfg.handlerDeleteChirp)
+	mux.HandleFunc("POST /api/polka/webhooks", cfg.handlerPolkaWebhook)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -136,6 +143,7 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	type createUserResponse struct {
 		ID        string    `json:"id"`
 		Email     string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 		CreatedAt time.Time `json:"created_at"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}
@@ -174,6 +182,7 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(createUserResponse{
 		ID:        user.ID.String(),
 		Email:     user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 	})
@@ -348,6 +357,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	type loginResponse struct {
 		ID           string    `json:"id"`
 		Email        string    `json:"email"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 		CreatedAt    time.Time `json:"created_at"`
 		UpdatedAt    time.Time `json:"updated_at"`
 		Token        string    `json:"token"`
@@ -421,6 +431,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(loginResponse{
 		ID:           user.ID.String(),
 		Email:        user.Email,
+		IsChirpyRed:  user.IsChirpyRed,
 		CreatedAt:    user.CreatedAt,
 		UpdatedAt:    user.UpdatedAt,
 		Token:        tokenString,
@@ -502,6 +513,7 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	type updateUserResponse struct {
 		ID        string    `json:"id"`
 		Email     string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 		CreatedAt time.Time `json:"created_at"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}
@@ -563,6 +575,7 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	resp := updateUserResponse{
 		ID:        updatedUser.ID.String(),
 		Email:     updatedUser.Email,
+		IsChirpyRed: updatedUser.IsChirpyRed,
 		CreatedAt: updatedUser.CreatedAt,
 		UpdatedAt: updatedUser.UpdatedAt,
 	}
@@ -633,5 +646,74 @@ func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 6. Respond with 204 No Content
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) handlerPolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	// Check API Key using the new auth function
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		log.Printf("Error getting API key: %v", err)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Couldn't find API key"})
+		return
+	}
+	if apiKey != cfg.polkaKey {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(errorResponse{Error: "API key is invalid"})
+		return
+	}
+
+	// Define request structure
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID string `json:"user_id"`
+		}
+	}
+
+	// Decode request body
+	decoder := json.NewDecoder(r.Body)
+	var req parameters
+	if err := decoder.Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid request body"})
+		return
+	}
+
+	// Check event type
+	if req.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent) // 204 for ignored events
+		return
+	}
+
+	// Parse User ID
+	userID, err := uuid.Parse(req.Data.UserID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Invalid user ID format in webhook data"})
+		return
+	}
+
+	// Update user in database
+	ctx := r.Context()
+	_, err = cfg.dbQueries.UpgradeUserToChirpyRed(ctx, userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.WriteHeader(http.StatusNotFound) // User not found
+			return
+		}
+		log.Printf("Failed to update user %s to Chirpy Red via webhook: %v", userID, err)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errorResponse{Error: "Failed to update user"})
+		return
+	}
+
+	// Respond with 204 No Content on success
 	w.WriteHeader(http.StatusNoContent)
 }

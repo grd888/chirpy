@@ -79,3 +79,26 @@ func MakeRefreshToken() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+// ErrorNoAuthHeaderIncluded - ...
+var ErrorNoAuthHeaderIncluded = errors.New("no authorization header included")
+
+// ErrMalformedAuthHeader - ...
+var ErrMalformedAuthHeader = errors.New("malformed authorization header")
+
+// GetAPIKey extracts an API key from
+// the authorization header
+// Example:
+// Authorization: ApiKey {insert apikey here}
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", ErrorNoAuthHeaderIncluded
+	}
+	splitAuth := strings.Split(authHeader, " ")
+	if len(splitAuth) < 2 || splitAuth[0] != "ApiKey" {
+		return "", ErrMalformedAuthHeader
+	}
+
+	return splitAuth[1], nil
+}
