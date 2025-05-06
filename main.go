@@ -307,6 +307,21 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 
 func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
 	authorIDStr := r.URL.Query().Get("author_id")
+	sortOrder := r.URL.Query().Get("sort")
+	
+	// Define a response struct with lowercase JSON field names
+	type chirpResponse struct {
+		ID        string    `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body      string    `json:"body"`
+		UserID    string    `json:"user_id"`
+	}
+	
+	// Default to ascending order if not specified or invalid
+	if sortOrder != "asc" && sortOrder != "desc" {
+		sortOrder = "asc"
+	}
 
 	var chirps []database.Chirp
 	var err error
@@ -319,10 +334,20 @@ func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request
 			json.NewEncoder(w).Encode(errorResponse{Error: "Invalid author_id format"})
 			return
 		}
-		// This function will be created in the database package later
-		chirps, err = cfg.dbQueries.GetChirpsByAuthorID(r.Context(), authorID)
+		
+		// Call the appropriate query based on sort order
+		if sortOrder == "asc" {
+			chirps, err = cfg.dbQueries.GetChirpsByAuthorID(r.Context(), authorID)
+		} else {
+			chirps, err = cfg.dbQueries.GetChirpsByAuthorIDDesc(r.Context(), authorID)
+		}
 	} else {
-		chirps, err = cfg.dbQueries.GetAllChirps(r.Context())
+		// Call the appropriate query based on sort order
+		if sortOrder == "asc" {
+			chirps, err = cfg.dbQueries.GetAllChirps(r.Context())
+		} else {
+			chirps, err = cfg.dbQueries.GetAllChirpsDesc(r.Context())
+		}
 	}
 
 	if err != nil {
@@ -333,14 +358,21 @@ func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// If no chirps are found, an empty slice is preferred over null in JSON
-	if chirps == nil {
-		chirps = []database.Chirp{}
+	// Convert database chirps to response format with lowercase JSON keys
+	response := make([]chirpResponse, 0, len(chirps))
+	for _, chirp := range chirps {
+		response = append(response, chirpResponse{
+			ID:        chirp.ID.String(),
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID.String(),
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(chirps)
+	json.NewEncoder(w).Encode(response)
 }
 
 func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
